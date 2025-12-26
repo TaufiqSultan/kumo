@@ -1,4 +1,5 @@
 import { animeService } from "@/lib/api/anime";
+import { Episode } from "@/lib/api/types";
 import { VideoPlayer } from "@/components/features/VideoPlayer";
 import { EpisodeList } from "@/components/features/EpisodeList";
 import { Button } from "@/components/ui/button";
@@ -67,8 +68,20 @@ export default async function WatchPage({ params, searchParams }: PageProps) {
       }
   }
   
+  // Usage Fallback: Ensure we always have an episode object for the player (needed for history)
+  const fallbackEpisode: Episode = {
+      id: apiEpisodeId,
+      number: parseInt(ep || "1") || 1,
+      title: `Episode ${ep || "1"}`,
+      isFiller: false,
+      image: anime?.image,
+      description: "Episode details unavailable"
+  };
+
+  const finalEpisode = currentEp || fallbackEpisode;
+
   // Use the resolved episode ID if found, otherwise fallback to the param ID
-  const activeEpisodeId = currentEp?.id || episodeId;
+  const activeEpisodeId = finalEpisode.id;
   const hasSub = !!subData?.servers?.length;
   const hasDub = !!dubData?.servers?.length;
   
@@ -120,7 +133,7 @@ export default async function WatchPage({ params, searchParams }: PageProps) {
                         headers={streamData.headers}
                         subtitles={streamData.subtitles}
                         anime={anime || undefined}
-                        episode={currentEp || undefined}
+                        episode={finalEpisode}
                         hasNextEpisode={currentEpIndex !== -1 && currentEpIndex < (anime?.episodes?.length || 0) - 1}
                         nextEpisodeUrl={
                             anime?.episodes && currentEpIndex !== -1 && currentEpIndex < anime.episodes.length - 1

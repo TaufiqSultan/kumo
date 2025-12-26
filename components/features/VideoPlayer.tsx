@@ -19,6 +19,21 @@ import {
 import { Subtitle, Anime, Episode } from "@/lib/api/types";
 import { useWatchHistory } from "@/hooks/useWatchHistory";
 
+interface SafariDocument extends Document {
+  webkitFullscreenElement?: Element;
+  webkitExitFullscreen?: () => Promise<void>;
+}
+
+interface SafariHTMLElement extends HTMLElement {
+  webkitRequestFullscreen?: () => Promise<void>;
+  webkitEnterFullscreen?: () => void;
+}
+
+interface SafariVideoElement extends HTMLVideoElement {
+  webkitEnterFullscreen?: () => void;
+  webkitExitFullscreen?: () => void;
+}
+
 interface VideoPlayerProps {
   url: string;
   poster?: string;
@@ -58,6 +73,7 @@ export function VideoPlayer({
   const [isPlaying, setIsPlaying] = useState(false);
   const [isReady, setIsReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [currentSubtitle, setCurrentSubtitle] = useState<number>(-1); // -1 = Off
   const [internalSubtitles, setInternalSubtitles] = useState<Subtitle[]>([]); // HLS internal subs
   const [qualities, setQualities] = useState<{ id: number; height: number; bitrate: number }[]>([]);
@@ -71,6 +87,11 @@ export function VideoPlayer({
   const referer = headers?.["Referer"] || headers?.["referer"];
   const animeId = anime?.id;
   const episodeId = episode?.id;
+
+  // Force scroll to top on mount to disable auto-scroll to list
+  useEffect(() => {
+      window.scrollTo({ top: 0, behavior: "instant" });
+  }, []);
 
   // Initialize HLS
   useEffect(() => {
@@ -182,6 +203,61 @@ export function VideoPlayer({
           }
           hasResumedRef.current = true;
       }
+
+      // Handle Native iOS Subtitles
+      const updateNativeSubtitles = () => {
+          if (!video.textTracks) return;
+          const nativeSubs: Subtitle[] = [];
+          // Loop through all tracks
+          for (let i = 0; i < video.textTracks.length; i++) {
+               const track = video.textTracks[i];
+               // We assume tracks with no 'src' (we can't verify 'src' on TextTrack object directly easily, 
+               // but we can trust checking internalSubtitles won't hurt thanks to dedupe).
+               // We only care about subtitles/captions
+               if (track.kind === 'subtitles' || track.kind === 'captions') {
+                   // Ensure we have a label
+                   const label = track.label || track.language || `Track ${i}`;
+                   // Skip if it looks like one of our externally added tracks (optional optimization)
+                   nativeSubs.push({
+                       url: "", 
+                       lang: label,
+                       kind: "captions"
+                   });
+               }
+          }
+          
+          setInternalSubtitles(prev => {
+             // Basic equality check to prevent loops
+             if (prev.length === nativeSubs.length && prev.every((s, i) => s.lang === nativeSubs[i].lang)) {
+                 return prev;
+             }
+             return nativeSubs;
+          });
+      };
+
+      video.textTracks.addEventListener("addtrack", updateNativeSubtitles);
+      video.textTracks.addEventListener("removetrack", updateNativeSubtitles);
+      
+      // Also poll briefly as iOS might load them async without 'addtrack' reliably in all versions
+      const interval = setInterval(updateNativeSubtitles, 1000);
+      
+      // Store cleanup for this specific branch? 
+      // Since we are inside the main useEffect, we need to adapt the return function.
+      
+      // We can repurpose the cleanup function below
+      const originalCleanup = () => {
+          hls.destroy();
+          hlsRef.current = null;
+      };
+      
+      // Override cleanup to include our listeners
+      return () => {
+          clearInterval(interval);
+          video.textTracks.removeEventListener("addtrack", updateNativeSubtitles);
+          video.textTracks.removeEventListener("removetrack", updateNativeSubtitles);
+          originalCleanup();
+      };
+
     } else {
       setTimeout(() => setError("HLS not supported."), 0);
     }
@@ -334,12 +410,138 @@ export function VideoPlayer({
   }, [showFeedback]);
 
   const toggleFullscreen = React.useCallback(() => {
-    if (!document.fullscreenElement) {
-        containerEl?.requestFullscreen();
+    // 1. Try standard Fullscreen API first
+    const doc = document as SafariDocument;
+    
+    // Check if we are on iOS by checking for webkitEnterFullscreen on video element
+    // This is the specific API for iOS Native Player
+    const videoEl = videoRef.current as SafariVideoElement;
+    if (videoEl && videoEl.webkitEnterFullscreen) {
+         videoEl.webkitEnterFullscreen();
+         // We don't need to manually set isFullscreen here, usually. 
+         // But we can for state consistency if needed, though iOS native player takes over completely.
+         return;
+    }
+
+    if (!document.fullscreenElement && !doc.webkitFullscreenElement) {
+        if (containerEl?.requestFullscreen) {
+            containerEl.requestFullscreen().catch(() => {
+                // Determine if we are on iOS (where requestFullscreen often fails on divs)
+                // Fallback to CSS fullscreen
+                setIsFullscreen(true);
+            });
+        } else if ((containerEl as SafariHTMLElement)?.webkitRequestFullscreen) {
+             (containerEl as SafariHTMLElement).webkitRequestFullscreen?.();
+        } else {
+            // Fallback for custom CSS fullscreen
+             setIsFullscreen(true);
+        }
     } else {
-        if (document.exitFullscreen) document.exitFullscreen();
+        if (document.exitFullscreen) {
+            document.exitFullscreen();
+        } else if (doc.webkitExitFullscreen) {
+             doc.webkitExitFullscreen();
+        }
+        setIsFullscreen(false);
     }
   }, [containerEl]);
+
+  // Filter subtitles based on user preference and deduplicate
+  const allSubtitles = React.useMemo(() => {
+     // Start with external, then add internal 
+     const merged = [...subtitles, ...internalSubtitles];
+     
+     // Deduplicate by normalized language label
+     const uniqueMap = new Map<string, Subtitle>();
+     
+     merged.forEach(sub => {
+         const label = sub.lang.trim();
+         const key = label.toLowerCase();
+         // Favor external tracks (ones with URL) for consistency with our proxy
+         const existing = uniqueMap.get(key);
+         if (!existing || (!existing.url && sub.url)) {
+             uniqueMap.set(key, sub);
+         }
+     });
+     
+     return Array.from(uniqueMap.values()).sort((a,b) => a.lang.localeCompare(b.lang));
+  }, [subtitles, internalSubtitles]);
+
+  const filteredSubtitles = React.useMemo(() => {
+    // Remove thumbnails/previews
+    let relevant = allSubtitles.filter(s => s.kind !== "thumbnails" && s.lang.toLowerCase() !== "thumbnails");
+    
+    // If there are too many subtitles (over 50, which can happen with automated streams), 
+    // prioritize English and common languages to avoid menu bloat.
+    if (relevant.length > 50) {
+        relevant = relevant.filter(s => 
+            s.lang.toLowerCase().includes("eng") || 
+            s.lang.toLowerCase().includes("jp") || 
+            s.lang.toLowerCase().includes("esp")
+        );
+    }
+    
+    return relevant;
+  }, [allSubtitles]);
+
+  // Sync fullscreen state with browser events
+  useEffect(() => {
+      const handleFullscreenChange = () => {
+          const doc = document as SafariDocument;
+          const isFull = !!document.fullscreenElement || !!doc.webkitFullscreenElement;
+          setIsFullscreen(isFull);
+      };
+
+      document.addEventListener("fullscreenchange", handleFullscreenChange);
+      document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+      return () => {
+          document.removeEventListener("fullscreenchange", handleFullscreenChange);
+          document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
+      };
+  }, []);
+
+  // iOS Native Fullscreen Subtitle Sync
+  useEffect(() => {
+      const video = videoRef.current;
+      if (!video) return;
+
+      const handleBeginFullscreen = () => {
+          // Identify active track index
+          if (currentSubtitle !== -1) {
+              const tracks = video.textTracks;
+              // We need to find the track that corresponds to our current selection
+              // This depends on how tracks are ordered.
+              // Our filteredSubtitles map to tracks in order.
+              // HOWEVER, internal/external track merging makes index matching tricky.
+              // Best bet is to match by label.
+              const selectedSub = filteredSubtitles[currentSubtitle];
+              if (selectedSub) {
+                   for (let i = 0; i < tracks.length; i++) {
+                       if (tracks[i].label === selectedSub.lang) {
+                           tracks[i].mode = 'showing'; // Show native subtitles
+                           break;
+                       }
+                   }
+              }
+          }
+      };
+
+      const handleEndFullscreen = () => {
+           // Hide all native tracks to resume custom overlay
+           const tracks = video.textTracks;
+           for (let i = 0; i < tracks.length; i++) {
+               tracks[i].mode = 'hidden'; 
+           }
+      };
+
+      video.addEventListener('webkitbeginfullscreen', handleBeginFullscreen);
+      video.addEventListener('webkitendfullscreen', handleEndFullscreen);
+      
+      return () => {
+          video.removeEventListener('webkitbeginfullscreen', handleBeginFullscreen);
+          video.removeEventListener('webkitendfullscreen', handleEndFullscreen);
+      };
+  }, [currentSubtitle, filteredSubtitles]);
 
   // Keyboard Shortcuts
   useEffect(() => {
@@ -416,43 +618,7 @@ export function VideoPlayer({
     };
   }, [handleProgress]);
 
-  // Filter subtitles based on user preference and deduplicate
-  const allSubtitles = React.useMemo(() => {
-     // Start with external, then add internal 
-     const merged = [...subtitles, ...internalSubtitles];
-     
-     // Deduplicate by normalized language label
-     const uniqueMap = new Map<string, Subtitle>();
-     
-     merged.forEach(sub => {
-         const label = sub.lang.trim();
-         const key = label.toLowerCase();
-         // Favor external tracks (ones with URL) for consistency with our proxy
-         const existing = uniqueMap.get(key);
-         if (!existing || (!existing.url && sub.url)) {
-             uniqueMap.set(key, sub);
-         }
-     });
-     
-     return Array.from(uniqueMap.values()).sort((a,b) => a.lang.localeCompare(b.lang));
-  }, [subtitles, internalSubtitles]);
-
-  const filteredSubtitles = React.useMemo(() => {
-    // Remove thumbnails/previews
-    let relevant = allSubtitles.filter(s => s.kind !== "thumbnails" && s.lang.toLowerCase() !== "thumbnails");
-    
-    // If there are too many subtitles (over 50, which can happen with automated streams), 
-    // prioritize English and common languages to avoid menu bloat.
-    if (relevant.length > 50) {
-        relevant = relevant.filter(s => 
-            s.lang.toLowerCase().includes("eng") || 
-            s.lang.toLowerCase().includes("jp") || 
-            s.lang.toLowerCase().includes("esp")
-        );
-    }
-    
-    return relevant;
-  }, [allSubtitles]);
+  // Removed misplaced subtitle logic from here
 
 
 
@@ -572,7 +738,12 @@ export function VideoPlayer({
   return (
     <div 
         ref={setContainerEl} 
-        className="relative w-full aspect-video bg-black rounded-xl overflow-hidden group shadow-2xl ring-1 ring-white/10"
+        className={clsx(
+            "relative w-full overflow-hidden group shadow-2xl transition-all duration-300 bg-black",
+            isFullscreen 
+                ? "fixed inset-0 z-50 w-screen h-[100dvh] rounded-none ring-0" 
+                : "aspect-video rounded-xl ring-1 ring-white/10"
+        )}
         onMouseMove={handleMouseMove}
         onMouseLeave={() => isPlaying && setShowControls(false)}
     >
@@ -596,6 +767,7 @@ export function VideoPlayer({
             onLoadedMetadata={handleLoadedMetadata}
             onEnded={handleNextEpisode}
             crossOrigin="anonymous"
+            playsInline
           >
              {filteredSubtitles.map((sub, index) => {
                 let trackSrc = sub.url;
