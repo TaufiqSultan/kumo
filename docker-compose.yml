@@ -1,0 +1,13 @@
+services:
+  kumo:
+    image: ghcr.io/taufiqsultan/kumo:latest
+    container_name: kumo
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+    # Uncomment the following lines if you have environment variables 
+    # defined in a .env file and want to pass them to the container
+    # env_file:
+    #   - .env

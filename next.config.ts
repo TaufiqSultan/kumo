@@ -6,19 +6,12 @@ const nextConfig: NextConfig = {
     remotePatterns: [
       {
         protocol: "https",
-        hostname: "s4.anilist.co",
-      },
-      {
-        protocol: "https",
-        hostname: "media.kitsu.io",
-      },
-      {
-        protocol: "https",
-        hostname: "cdn.noitatnemucod.net",
+        hostname: "**",
       },
     ],
   },
   reactCompiler: true,
+  output: "standalone",
 };
 
 export default nextConfig;

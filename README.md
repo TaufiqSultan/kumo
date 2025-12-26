@@ -31,7 +31,34 @@ Kumo is a modern, premium anime streaming application built with Next.js 14, des
 - **State/Data**: Server Components & Server Actions for efficient data fetching.
 - **Video**: HTML5 Video with custom HLS handling logic.
 
-## 🚀 Getting Started
+## 🐳 Deployment with Docker
+
+You can easily deploy Kumo using Docker directly from the GitHub Container Registry.
+
+### Using Docker Compose (Recommended)
+
+1. Use the provided [`docker-compose.yml`](./docker-compose.yml) file. Copy it to your server.
+
+2. Start the container:
+
+   ```bash
+   docker-compose up -d
+   ```
+
+### Using Docker CLI
+
+Alternatively, you can run the container directly with the Docker CLI:
+
+```bash
+docker run -d \
+  --name kumo \
+  --restart always \
+  -p 3000:3000 \
+  -e NODE_ENV=production \
+  ghcr.io/taufiqsultan/kumo:latest
+```
+
+## 🚀 Getting Started (Local)
 
 ### Prerequisites
 
